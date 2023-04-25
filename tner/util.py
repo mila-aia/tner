@@ -294,7 +294,6 @@ def load_hf(model: str,
             label2id=label2id,
             local_files_only=local_files_only)
     else:
-        config = AutoConfig.from_pretrained(model, use_auth_token=use_auth_token, local_files_only=local_files_only)
+        config = AutoConfig.from_pretrained(model, use_auth_token=use_auth_token, local_files_only=local_files_only,ignore_mismatched_sizes=True)
     return AutoModelForTokenClassification.from_pretrained(
-        model, config=config, use_auth_token=use_auth_token, local_files_only=local_files_only)
-
+        model, config=config, use_auth_token=use_auth_token, local_files_only=local_files_only,ignore_mismatched_sizes=True)
