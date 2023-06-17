@@ -3,7 +3,7 @@ import pickle
 import json
 import string
 import random
-from typing import List, Dict
+from typing import List, Dict, Tuple
 from tqdm import tqdm
 from itertools import chain
 
@@ -387,7 +387,7 @@ class LabelwiseTokenReplacement(DataAugmentator):
         logging.info("Finished setting up LabelwiseTokenReplacement augmentator\n")
 
         
-    def __call__(self,data_tokens:list[str],data_tags:list[int])->tuple[list[str],list[int]]:
+    def __call__(self,data_tokens:List[str],data_tags:List[int])->Tuple[List[str],List[int]]:
         """
         Parameters
         ----------
@@ -433,7 +433,7 @@ class SynoymReplacement(DataAugmentator):
         """
         super().__init__(name=name,
                          p_0=p_0)
-    def get_synonyms(self,word:str)->list[str]:
+    def get_synonyms(self,word:str)->List[str]:
             synonyms = []
             for syn in wordnet.synsets(word):
                 for lemma in syn.lemmas():
@@ -441,7 +441,7 @@ class SynoymReplacement(DataAugmentator):
                         synonyms.append(lemma.name())
             return synonyms
     
-    def __call__(self,data_tokens:list[str],data_tags:list[int])->tuple[list[str],list[int]]:
+    def __call__(self,data_tokens:List[str],data_tags:List[int])->Tuple[List[str],List[int]]:
         """
         Parameters
         ----------
@@ -478,8 +478,8 @@ class ShufflewithinSegments(DataAugmentator):
         self.non_entity_tag = label2id['O']
     
     def generate_segments(self,
-                          input_tokens:list[str],
-                          input_tags:list[int])->tuple[list[list[str]],list[list[int]]]:
+                          input_tokens:List[str],
+                          input_tags:List[int])->Tuple[List[List[str]],List[List[int]]]:
 
         # find locations in tags that are not non-entity
         tag_array = np.array(input_tags)
@@ -504,8 +504,8 @@ class ShufflewithinSegments(DataAugmentator):
         return token_segments,tag_segments
     
     def __call__(self,
-                 data_tokens:list[str],
-                 data_tags:list[int])->tuple[list[str],list[int]]:
+                 data_tokens:List[str],
+                 data_tags:List[int])->Tuple[List[str],List[int]]:
         token_segments,_=self.generate_segments(data_tokens,data_tags)
         for token_segment in token_segments:
             if random.random()<self.p_0:
@@ -517,8 +517,8 @@ class ShufflewithinSegments(DataAugmentator):
 
 class MentionReplacement(DataAugmentator):
     def __init__(self,  
-                 data:dict[str,dict[str,list[str]]]=None,
-                 label2id:dict[str,int]=None,
+                 data:Dict[str,Dict[str,List[str]]]=None,
+                 label2id:Dict[str,int]=None,
                  split_to_use:str='train',
                  p_0:float=0.5,
                  name:str='MentionReplacement'
@@ -531,8 +531,8 @@ class MentionReplacement(DataAugmentator):
         self.split_to_use = split_to_use
     
     def generate_segments(self,
-                          input_tokens:list[str],
-                          input_tags:list[int])->list[list[str]]:
+                          input_tokens:List[str],
+                          input_tags:List[int])->List[List[str]]:
 
         # find locations in tags that are not non-entity
         tag_array = np.array(input_tags)
@@ -573,7 +573,7 @@ class MentionReplacement(DataAugmentator):
         self.if_setup = True
         logging.info("Finished setting up MentionReplacement augmentator.\n")      
 
-    def __call__(self,data_tokens:list[str],data_tags:list[int])->tuple[list[str],list[int]]:
+    def __call__(self,data_tokens:List[str],data_tags:List[int])->Tuple[List[str],List[int]]:
         """
         Parameters
         ----------
