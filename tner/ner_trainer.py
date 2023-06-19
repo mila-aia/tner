@@ -9,7 +9,7 @@ from os.path import join as pj
 from typing import List, Dict
 from itertools import product
 from distutils.dir_util import copy_tree
-
+from tqdm import tqdm
 import torch
 import transformers
 
@@ -33,7 +33,7 @@ class Trainer:
                  local_dataset: List or Dict = None,
                  dataset_split: str = 'train',
                  dataset_name: List or str = None,
-                 data_augmentators: List[str]=None,
+                 data_augmentators: List[str]=[],
                  data_augmentation_prob: float=0.5,
                  model: str = 'roberta-large',
                  crf: bool = False,
@@ -248,12 +248,13 @@ class Trainer:
         interval = 50
         for e in range(self.current_epoch, self.config['epoch']):  # loop over the epoch
             if len(self.data_augmentators) > 0 :
-                logging.info('Applying data augmentation for epoch {}'.format(e))
+
+                logging.info(f"Applying {self.config['data_augmentators']} to the dataset..")
+                
                 tokens_agumented = []
                 tags_agumented = []
-                for token, tag in zip(self.dataset['tokens'], self.dataset['tags']):
+                for token, tag in tqdm(zip(self.dataset['tokens'], self.dataset['tags'])):
                     for data_augmentator in self.data_augmentators:
-                        logging.info(f'Applying {data_augmentator.name}')
                         token, tag = data_augmentator(token, tag)
                     tokens_agumented.append(token)
                     tags_agumented.append(tag)
@@ -354,7 +355,7 @@ class GridSearcher:
                  dataset_split_valid: str = 'validation',
                  dataset_name: List or str = None,
                  model: str = 'roberta-large',
-                 data_augmentators: List[str]=None,
+                 data_augmentators: List[str]=[],
                  data_augmentation_prob: float=0.5,
                  epoch: int = 10,
                  epoch_partial: int = 5,
