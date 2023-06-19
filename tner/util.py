@@ -3,9 +3,16 @@ import pickle
 import json
 import string
 import random
-from typing import List, Dict
+from typing import List, Dict, Tuple
 from tqdm import tqdm
 from itertools import chain
+
+import random
+import logging
+import nltk
+nltk.download('wordnet')
+from nltk.corpus import wordnet
+
 
 import numpy as np
 import torch
@@ -297,3 +304,305 @@ def load_hf(model: str,
         config = AutoConfig.from_pretrained(model, use_auth_token=use_auth_token, local_files_only=local_files_only,ignore_mismatched_sizes=True)
     return AutoModelForTokenClassification.from_pretrained(
         model, config=config, use_auth_token=use_auth_token, local_files_only=local_files_only,ignore_mismatched_sizes=True)
+
+
+class DataAugmentator:
+    def __init__(self,  
+                 p_0:float=0.5,
+                 name:str='BaseAugmentator',
+                 )->None:
+        """
+        Parameters
+        ----------
+        name: str
+            Name of the augmentator
+        p_0: float
+            Probability of applying the augmentator
+
+        """
+        self.name = name
+        self.p_0 = p_0
+        self.if_setup = False
+
+    def __call__(self,text:str)->None:
+        """
+        Parameters
+        ----------
+        text: str
+            Text to augment
+
+        Returns
+        -------
+        str
+            Augmented text
+        """
+        raise NotImplementedError
+    def setup(self)->None:
+        """
+        Setup the augmentator
+        """
+        self.if_setup=True
+
+class LabelwiseTokenReplacement(DataAugmentator):
+    def __init__(self,
+                 data:dict=None,
+                 label2id:dict=None,
+                 p_0:float=0.5,
+                 split_to_use='train',
+                 name:str='LabelwiseTokenReplacement')->None:
+        """
+        Parameters
+        ----------
+        data: dict
+            Dictionary of the form {split: {tokens: list[list[str]], tags: list[list[int]]}}
+        label2id: dict
+            Dictionary of the form {label: id}
+        p_0: float
+            Probability of applying the augmentator
+        split_to_use: str
+            Split to use to setup the augmentator
+        name: str
+            Name of the augmentator
+        """
+        super().__init__(name=name,p_0=p_0)
+        self.tag_2_tokens = {}
+        self.data = data
+        self.label2id = label2id
+        self.split_to_use = split_to_use
+    
+    def setup(self)->None:
+        # get a dictionary of the form {tag: [list of tokens]}
+   
+        train_tokens = self.data[self.split_to_use]["tokens"]
+        train_tags = self.data[self.split_to_use]["tags"]
+
+        logging.info(f"Setting up LabelwiseTokenReplacement augmentator with {self.split_to_use} split...\n")
+        for tags, tokens in tqdm(zip(train_tags, train_tokens)):
+            for tag, token in zip(tags, tokens):
+                if tag not in self.tag_2_tokens:
+                    self.tag_2_tokens[tag] = []
+                if token not in self.tag_2_tokens[tag]:
+                    self.tag_2_tokens[tag].append(token)
+        self.if_setup = True
+        logging.info("Finished setting up LabelwiseTokenReplacement augmentator\n")
+
+        
+    def __call__(self,data_tokens:List[str],data_tags:List[int])->Tuple[List[str],List[int]]:
+        """
+        Parameters
+        ----------
+        data_tokens: list[str]
+            List of tokens
+        data_tags: list[int]
+            List of tags
+
+        Returns
+        -------
+        data_tokens_augmented: list[str]
+            Augmented list of tokens
+        data_tags_augmented: list[int]
+            Augmented list of tags
+        """
+        if self.if_setup == False:
+            self.setup()
+        
+        data_tokens_augmented = data_tokens.copy()
+        data_tags_augmented = data_tags.copy()
+
+        for tag, token in zip(data_tags, data_tokens):
+                if random.random() < self.p_0:
+                    data_tokens_augmented[data_tokens_augmented.index(token)] = random.choice(self.tag_2_tokens[tag])
+        return data_tokens_augmented, data_tags_augmented
+
+class SynoymReplacement(DataAugmentator):
+    def __init__(self,
+                 p_0:float=0.5,
+                 name:str='SynoymReplacement'
+                 )->None:
+        """
+        Parameters
+        ----------
+        dataset: str
+            Path to the reference dataset (TNER format)
+        p_0: float
+            Probability of applying the augmentator
+        split_to_use: str
+            Split to use to setup the augmentator
+        name: str
+            Name of the augmentator
+        """
+        super().__init__(name=name,
+                         p_0=p_0)
+    def get_synonyms(self,word:str)->List[str]:
+            synonyms = []
+            for syn in wordnet.synsets(word):
+                for lemma in syn.lemmas():
+                    if  lemma.name() != word:
+                        synonyms.append(lemma.name())
+            return synonyms
+    
+    def __call__(self,data_tokens:List[str],data_tags:List[int])->Tuple[List[str],List[int]]:
+        """
+        Parameters
+        ----------
+        data_tokens: list[str]
+            List of tokens
+        data_tags: list[int]
+            List of tags
+
+        Returns
+        -------
+        data_tokens_augmented: list[str]
+            Augmented list of tokens
+        data_tags_augmented: list[int]
+            Augmented list of tags
+        """
+        data_tokens_augmented = data_tokens.copy()
+        data_tags_augmented = data_tags.copy()
+
+        for token in data_tokens:
+            if random.random() < self.p_0:
+                synonyms = self.get_synonyms(token)
+                if len(synonyms) > 0:
+                    data_tokens_augmented[data_tokens_augmented.index(token)] = random.choice(synonyms)
+        return data_tokens_augmented, data_tags_augmented
+    
+class ShufflewithinSegments(DataAugmentator):
+    def __init__(self,
+                 label2id:dict=None,
+                 p_0:float=0.5,
+                 name:str='ShufflewithinSegments'
+                 )->None:
+        super().__init__(name=name,p_0=p_0)
+        self.label2id = label2id
+        self.non_entity_tag = label2id['O']
+    
+    def generate_segments(self,
+                          input_tokens:List[str],
+                          input_tags:List[int])->Tuple[List[List[str]],List[List[int]]]:
+
+        # find locations in tags that are not non-entity
+        tag_array = np.array(input_tags)
+        entity_mask = tag_array != self.non_entity_tag
+        idx_segments= []
+        start = 0
+        for i in range(1, len(entity_mask)):
+            if entity_mask[i] != entity_mask[i-1]:
+                idx_segments.append(list(range(start, i)))
+                start = i
+        idx_segments.append(list(range(start, len(entity_mask))))
+
+        # convert to segments
+        token_segments = []
+        tag_segments = []
+
+        for idx_segment in idx_segments:
+            token_segments.append([input_tokens[i] for i in idx_segment])
+            tag_segments.append([input_tags[i] for i in idx_segment])
+
+        
+        return token_segments,tag_segments
+    
+    def __call__(self,
+                 data_tokens:List[str],
+                 data_tags:List[int])->Tuple[List[str],List[int]]:
+        token_segments,_=self.generate_segments(data_tokens,data_tags)
+        for token_segment in token_segments:
+            if random.random()<self.p_0:
+                token_segment=random.shuffle(token_segment)
+
+        concatenated_tokens = [token for token_segment in token_segments for token in token_segment]
+        return concatenated_tokens,data_tags
+
+
+class MentionReplacement(DataAugmentator):
+    def __init__(self,  
+                 data:Dict[str,Dict[str,List[str]]]=None,
+                 label2id:Dict[str,int]=None,
+                 split_to_use:str='train',
+                 p_0:float=0.5,
+                 name:str='MentionReplacement'
+                 )->None:
+        super().__init__(name=name,p_0=p_0)
+        self.data=data
+        self.label2id=label2id
+        self.non_entity_tag = label2id['O']
+        self.mention_instances = {}
+        self.split_to_use = split_to_use
+    
+    def generate_segments(self,
+                          input_tokens:List[str],
+                          input_tags:List[int])->List[List[str]]:
+
+        # find locations in tags that are not non-entity
+        tag_array = np.array(input_tags)
+        entity_mask = tag_array != self.non_entity_tag
+        idx_segments= []
+        start = 0
+        for i in range(1, len(entity_mask)):
+            if entity_mask[i] != entity_mask[i-1]:
+                idx_segments.append(list(range(start, i)))
+                start = i
+        idx_segments.append(list(range(start, len(entity_mask))))
+
+        # convert to segments
+        token_segments = []
+        tag_segments = []
+
+        for idx_segment in idx_segments:
+            token_segments.append([input_tokens[i] for i in idx_segment])
+            tag_segments.append([input_tags[i] for i in idx_segment])
+
+        
+        return token_segments,tag_segments    
+
+    def setup(self):
+        # get a dictionary of mention_instances{tag: [list of tokes, list of tags]}
+
+        train_tokens = self.data[self.split_to_use]["tokens"]
+        train_tags = self.data[self.split_to_use]["tags"]
+
+        logging.info(f"Setting up MentionReplacement augmentator with {self.split_to_use} split...\n")
+        for tokens, tags in tqdm(zip(train_tokens,train_tags)):
+            token_segments,tag_segments  = self.generate_segments(tokens,tags)
+            for token_segment,tag_segment in zip(token_segments,tag_segments):
+                if tag_segment[0] not in self.mention_instances and tag_segment[0] != self.non_entity_tag:
+                    self.mention_instances[tag_segment[0]] = []
+                if tag_segment[0] != self.non_entity_tag:
+                    self.mention_instances[tag_segment[0]].append([token_segment,tag_segment])
+        self.if_setup = True
+        logging.info("Finished setting up MentionReplacement augmentator.\n")      
+
+    def __call__(self,data_tokens:List[str],data_tags:List[int])->Tuple[List[str],List[int]]:
+        """
+        Parameters
+        ----------
+        data_tokens: list[str]
+            List of tokens
+        data_tags: list[int]
+            List of tags
+
+        Returns
+        -------
+        data_tokens_augmented: list[str]
+            Augmented list of tokens
+        data_tags_augmented: list[int]
+            Augmented list of tags
+        """
+        if self.if_setup == False:
+            self.setup()
+        
+        token_segments,tag_segments=self.generate_segments(data_tokens,data_tags)
+        token_segments_augmented = token_segments.copy()
+        tag_segments_augmented = tag_segments.copy()
+
+        for (idx,tag_segment)  in enumerate(tag_segments):
+            if tag_segment[0] in self.mention_instances and random.random()<self.p_0:
+                random_instance = random.choice(self.mention_instances[tag_segment[0]])
+                token_segments_augmented[idx] = random_instance[0]
+                tag_segments_augmented[idx] = random_instance[1]
+
+        concatenated_tokens = [token for token_segment in token_segments_augmented for token in token_segment]
+        concatenated_tags = [tag for tag_segment in tag_segments_augmented for tag in tag_segment]
+
+        return concatenated_tokens,concatenated_tags

@@ -9,14 +9,17 @@ from os.path import join as pj
 from typing import List, Dict
 from itertools import product
 from distutils.dir_util import copy_tree
-
+from tqdm import tqdm
 import torch
 import transformers
 
 from .get_dataset import get_dataset
 from .ner_model import TransformersNER
 from .util import json_save, json_load, get_random_string
-
+from .util import (LabelwiseTokenReplacement, 
+                    SynoymReplacement, 
+                    ShufflewithinSegments, 
+                    MentionReplacement)
 
 __all__ = ('GridSearcher', 'Trainer')
 
@@ -30,6 +33,8 @@ class Trainer:
                  local_dataset: List or Dict = None,
                  dataset_split: str = 'train',
                  dataset_name: List or str = None,
+                 data_augmentators: List[str]=[],
+                 data_augmentation_prob: float=0.5,
                  model: str = 'roberta-large',
                  crf: bool = False,
                  max_length: int = 128,
@@ -77,12 +82,15 @@ class Trainer:
         self.checkpoint_dir = checkpoint_dir
         self.model = None
         self.current_epoch = 0
+        self.data_augmentators = []
+        self.p_0 = data_augmentation_prob
         self.config = dict(
             dataset=dataset, dataset_split=dataset_split,
             dataset_name=dataset_name, local_dataset=local_dataset,
             model=model, crf=crf, max_length=max_length, epoch=epoch, batch_size=batch_size,
             lr=lr, random_seed=random_seed, gradient_accumulation_steps=gradient_accumulation_steps,
-            weight_decay=weight_decay, lr_warmup_step_ratio=lr_warmup_step_ratio, max_grad_norm=max_grad_norm
+            weight_decay=weight_decay, lr_warmup_step_ratio=lr_warmup_step_ratio, max_grad_norm=max_grad_norm,
+            data_augmentators=data_augmentators, data_augmentation_prob=data_augmentation_prob
         )
 
         # check local directly whether in progress checkpoints exist
@@ -125,6 +133,33 @@ class Trainer:
         self.step_per_epoch = int(
             len(self.dataset['tokens']) / self.config['batch_size'] / self.config['gradient_accumulation_steps']
         )
+
+        # setup data augmentators
+        for augmentator_name in self.config['data_augmentators']:
+            if augmentator_name=='lwtr': # Label Wise Token Replacement
+                self.data_augmentators.append(LabelwiseTokenReplacement(
+                                                        data=data,
+                                                        label2id=label2id,
+                                                        p_0=self.p_0,
+                                                        split_to_use=self.config['dataset_split']))
+                
+            if augmentator_name == 'sr': # Synonym Replacement
+                 self.data_augmentators.append(SynoymReplacement(p_0=self.p_0))
+
+            if augmentator_name == 'mr': # Mention Replacement
+                self.data_augmentators.append(MentionReplacement(
+                                                        data=data,
+                                                        label2id=label2id,
+                                                        p_0=self.p_0,
+                                                        split_to_use=self.config['dataset_split']))
+                
+            if augmentator_name == 'sis': # ShufflewithinSegments
+                self.data_augmentators.append(ShufflewithinSegments(
+                                                        label2id=label2id,
+                                                        p_0=self.p_0))
+        
+        for data_augmentator in self.data_augmentators:
+            data_augmentator.setup()
 
         ####################
         # initialize model #
@@ -195,17 +230,43 @@ class Trainer:
         assert self.current_epoch != self.config['epoch'], 'training is over'
         assert len(self.dataset['tokens']) >= self.config['batch_size'],\
             f"batch size should be less than the dataset ({len(self.dataset['tokens'])})"
-        loader = self.model.get_data_loader(
-            inputs=self.dataset['tokens'],
-            labels=self.dataset['tags'],
-            batch_size=self.config['batch_size'],
-            shuffle=True,
-            drop_last=True,
-            cache_file_feature=pj(self.checkpoint_dir, "cache", "encoded_feature.pkl")
-        )
-        logging.info('start model training')
+        
+        if len(self.data_augmentators) ==0 :
+            logging.info('No data augmentation. Training will start with the original dataset.')
+            loader = self.model.get_data_loader(
+                inputs=self.dataset['tokens'],
+                labels=self.dataset['tags'],
+                batch_size=self.config['batch_size'],
+                shuffle=True,
+                drop_last=True,
+                cache_file_feature=pj(self.checkpoint_dir, "cache", "encoded_feature.pkl")
+            )
+            logging.info('Start model training')
+        else:
+            logging.info('Start model training with data augmentation.')
+
         interval = 50
         for e in range(self.current_epoch, self.config['epoch']):  # loop over the epoch
+            if len(self.data_augmentators) > 0 :
+
+                logging.info(f"Applying {self.config['data_augmentators']} to the dataset..")
+                
+                tokens_agumented = []
+                tags_agumented = []
+                for token, tag in tqdm(zip(self.dataset['tokens'], self.dataset['tags'])):
+                    for data_augmentator in self.data_augmentators:
+                        token, tag = data_augmentator(token, tag)
+                    tokens_agumented.append(token)
+                    tags_agumented.append(tag)
+
+                loader = self.model.get_data_loader(
+                    inputs=tokens_agumented,
+                    labels=tags_agumented,
+                    batch_size=self.config['batch_size'],
+                    shuffle=True,
+                    drop_last=True,
+                    cache_file_feature=None
+                )
             total_loss = []
             self.optimizer.zero_grad()
             for n, encode in enumerate(loader):
@@ -294,6 +355,8 @@ class GridSearcher:
                  dataset_split_valid: str = 'validation',
                  dataset_name: List or str = None,
                  model: str = 'roberta-large',
+                 data_augmentators: List[str]=[],
+                 data_augmentation_prob: float=0.5,
                  epoch: int = 10,
                  epoch_partial: int = 5,
                  n_max_config: int = 5,
@@ -345,6 +408,8 @@ class GridSearcher:
         self.epoch_partial = epoch_partial
         self.batch_size_eval = batch_size_eval
         self.n_max_config = n_max_config
+        self.data_augmentators = data_augmentators
+        self.data_augmentation_prob = data_augmentation_prob
 
         # evaluation configs
         self.eval_config = {
@@ -447,7 +512,10 @@ class GridSearcher:
                 raise ValueError(f'duplicated checkpoints are found: \n {duplicated_ckpt}')
 
             if not os.path.exists(pj(checkpoint_dir, f'epoch_{self.epoch_partial}')):
-                trainer = Trainer(checkpoint_dir=checkpoint_dir, disable_log=True, **config)
+                trainer = Trainer(checkpoint_dir=checkpoint_dir, disable_log=True, 
+                                  data_augmentators=self.data_augmentators,
+                                  data_augmentation_prob=self.data_augmentation_prob,
+                                  **config)
                 trainer.train(epoch_partial=self.epoch_partial, epoch_save=1, optimizer_on_cpu=optimizer_on_cpu)
             checkpoints.append(checkpoint_dir)
 
@@ -479,7 +547,9 @@ class GridSearcher:
             logging.info(f'## 2nd RUN: Configuration {n}/{len(metrics)}: {_metric}')
             model_ckpt = os.path.dirname(checkpoint_dir_model)
             if not os.path.exists(pj(model_ckpt, f"epoch_{self.static_config['epoch']}")):
-                trainer = Trainer(checkpoint_dir=model_ckpt, disable_log=True)
+                trainer = Trainer(checkpoint_dir=model_ckpt, disable_log=True,
+                                  data_augmentators=self.data_augmentators,
+                                  data_augmentation_prob=self.data_augmentation_prob)
                 trainer.train(epoch_save=1, optimizer_on_cpu=optimizer_on_cpu)
             checkpoints.append(model_ckpt)
         metrics = {}
@@ -518,7 +588,9 @@ class GridSearcher:
                     trainer = Trainer(
                         checkpoint_dir=best_model_dir,
                         config_file='trainer_config.additional_training.json',
-                        disable_log=True)
+                        disable_log=True,
+                        data_augmentators=self.data_augmentators,
+                        data_augmentation_prob=self.data_augmentation_prob)
                     trainer.train(epoch_save=1, optimizer_on_cpu=optimizer_on_cpu)
                 logging.info(f'## 3rd RUN (EVAL): epoch {epoch} ##')
 
